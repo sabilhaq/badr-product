@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"strconv"
 
@@ -16,67 +17,137 @@ func main() {
 		panic("failed to connect database")
 	}
 
-	// Migrate the schema
 	db.AutoMigrate(&Product{}, &Attribute{})
 
 	app.Get("/", func(c *fiber.Ctx) error {
-		var results []Join
-		db.Model(&Product{}).Select("products.id, attributes.name").Joins("left join attributes on attributes.product_id = products.id").Scan(&results)
-		return c.JSON(&ResponseJSON{
-			Data: results,
-		})
-	})
+		var ams []Attribute
+		_ = db.Model(&Product{}).Select("name, value, product_id").Joins("left join attributes on attributes.product_id = products.id").Scan(&ams)
 
-	app.Post("/", func(c *fiber.Ctx) error {
-		body := new(Join)
+		var idLast uint
+		var attrsTemp []Attribute
+		mapRes := map[uint][]Attribute{}
+		for _, attribute := range ams {
+			var id = attribute.ProductID
 
-		if err := c.BodyParser(body); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"message": err.Error(),
-			})
+			if id == idLast {
+				attrsTemp = append(attrsTemp, Attribute{
+					Name:  attribute.Name,
+					Value: attribute.Value,
+				})
+			} else {
+				idLast = id
+				attrsTemp = []Attribute{attribute}
+			}
+			mapRes[id] = attrsTemp
 		}
 
-		product := &Product{}
+		var resArr []ResponseBody
+		for key, attributes := range mapRes {
+			var attributesRes []AttributeRep
 
-		db.Create(product)
-		db.Create(&Attribute{Name: body.Name, ProductID: product.ID})
+			for _, at := range attributes {
+				attributesRes = append(attributesRes, AttributeRep{
+					Name:  at.Name,
+					Value: at.Value,
+				})
+			}
+
+			mapAttribute := make(map[string]interface{})
+			for _, am := range attributesRes {
+				val, err := strconv.ParseInt(am.Value, 10, 64)
+				if err != nil {
+					mapAttribute[am.Name] = am.Value
+				} else {
+					mapAttribute[am.Name] = val
+				}
+			}
+
+			resArr = append(resArr, ResponseBody{
+				ID:        int(key),
+				Attribute: mapAttribute,
+			})
+
+		}
 
 		return c.JSON(&ResponseJSON{
-			Data: product,
+			Data: resArr,
 		})
 	})
 
 	app.Get("/:id", func(c *fiber.Ctx) error {
 		id := c.Params("id")
-		var results []Join
-		db.Model(&Product{}).Where("products.id = ?", id).Select("products.id, attributes.name").Joins("left join attributes on attributes.product_id = products.id").Scan(&results)
+
+		var ams []Attribute
+		_ = db.Model(&Product{}).Select("name, value, product_id").Joins("left join attributes on attributes.product_id = products.id").Where("products.id = ?", id).Scan(&ams)
+
+		var respBody ResponseBody
+		mapAttribute := make(map[string]interface{})
+		respBody.ID = int(ams[0].ProductID)
+		for _, am := range ams {
+			val, err := strconv.ParseInt(am.Value, 10, 64)
+			if err != nil {
+				mapAttribute[am.Name] = am.Value
+			} else {
+				mapAttribute[am.Name] = val
+			}
+		}
+		respBody.Attribute = mapAttribute
+
 		return c.JSON(&ResponseJSON{
-			Data: results[0],
+			Data: respBody,
 		})
 	})
 
-	app.Put("/:id", func(c *fiber.Ctx) error {
-		id := c.Params("id")
-
-		body := new(Join)
-		if err := c.BodyParser(body); err != nil {
+	app.Post("/", func(c *fiber.Ctx) error {
+		request := new(RequestBody)
+		if err := c.BodyParser(request); err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"message": err.Error(),
 			})
 		}
 
 		product := &Product{}
-		productId, _ := strconv.ParseUint(id, 10, 64)
-		db.Model(&Attribute{}).Where("product_id = ?", productId).Updates(&Attribute{Name: body.Name, ProductID: uint(productId)})
+		db.Create(product)
+
+		for key, val := range request.Attribute {
+			db.Create(&Attribute{
+				Name:      key,
+				Value:     fmt.Sprintf("%v", val),
+				ProductID: product.ID,
+			})
+		}
+
 		return c.JSON(&ResponseJSON{
-			Data: product,
+			Data: map[string]int{
+				"id": int(product.ID),
+			},
+		})
+	})
+
+	app.Put("/:id", func(c *fiber.Ctx) error {
+		productId, _ := strconv.ParseUint(c.Params("id"), 10, 64)
+
+		request := new(RequestBody)
+		if err := c.BodyParser(request); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"message": err.Error(),
+			})
+		}
+
+		for key, val := range request.Attribute {
+			db.Model(&Attribute{}).Where("product_id = ? and name = ?", productId, key).Update("value", val)
+		}
+
+		return c.JSON(&ResponseJSON{
+			Data: map[string]uint64{
+				"id": productId,
+			},
 		})
 	})
 
 	app.Delete("/:id", func(c *fiber.Ctx) error {
-		id := c.Params("id")
-		productId, _ := strconv.ParseUint(id, 10, 64)
-		db.Where("id = ?", uint(productId)).Delete(&Product{})
+		productId, _ := strconv.ParseUint(c.Params("id"), 10, 64)
+		db.Delete(&Product{}, productId)
 		return c.JSON(&ResponseJSON{
 			Data: nil,
 		})
@@ -85,9 +156,19 @@ func main() {
 	log.Fatal(app.Listen(":3000"))
 }
 
+type RequestBody struct {
+	Attribute map[string]interface{} `json:"attribute"`
+}
+
 type Join struct {
-	ID   int    `json:"id"`
-	Name string `json:"name"`
+	ID    int    `json:"id"`
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type ResponseBody struct {
+	ID        int                    `json:"id"`
+	Attribute map[string]interface{} `json:"attribute"`
 }
 
 type Product struct {
@@ -96,8 +177,14 @@ type Product struct {
 
 type Attribute struct {
 	gorm.Model
-	Name      string `json:"name"`
-	ProductID uint   `json:"product_id"`
+	Name      string
+	Value     string
+	ProductID uint
+}
+
+type AttributeRep struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 type ResponseJSON struct {
